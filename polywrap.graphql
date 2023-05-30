@@ -1,8 +1,5 @@
-type Module {
-    eval(src: String!): EvalResult!
-}
+#import {Module} into Reflection from "ipfs/QmczB9WjLgZuuBhHwCAaCGNguTBoSFqUqa7fdLpYiJx5VL"
+#import {Module} into JsEngine from "ipfs/QmY6jcEbshkeA4Dk37mwkZD6ebdv4zd6ADDoyMy2x2bmed"
 
-type EvalResult {
-    value: JSON
-    error: String
+type Module {
 }

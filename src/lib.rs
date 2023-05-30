@@ -1,238 +1,78 @@
-pub mod wrap;
-use JSON::json;
+mod wrap;
 use wrap::*;
-use polywrap_wasm_rs::{JSON};
-use boa_engine::{ Context, JsValue, JsString };
-use boa_engine::{
-    native_function::NativeFunction, prelude::JsObject, property::Attribute, Context, JsResult,
-    JsValue, Source,
-};
-use std::fs::read_to_string;
+use wrap::imported::ArgsGetResource;
+use wrap::{ReflectionModule, JsEngineModule};
 
-pub fn eval(args: ArgsEval) -> EvalResult {
-    let js_code = args.src;
-
-    let mut context = Context::default();
-
-    match context.eval(js_code) {
-        Ok(result) => {
-            EvalResult {
-                value: Some(match &result {
-                    JsValue::Null => json!("null"),
-                    JsValue::Undefined => json!("undefined"),
-                    JsValue::Boolean(bool) => json!(bool),
-                    JsValue::String(string) => json!(string.to_string()),
-                    JsValue::Rational(f64) => json!(f64),
-                    JsValue::Integer(i32) => json!(i32),
-                    JsValue::BigInt(big_int) => json!(big_int.to_string()),
-                    _ => json!("Object or Symbol".to_string())          
-                }),
-                error: None
-            }
-        }
-        Err(err) => {
-            EvalResult {
-                value: None,
-                error: Some(err.display().to_string())
-            }
-        }
-    }
+pub fn run(method: &str, args: &[u8]) -> Vec<u8> {
+    run_js_wrapper(method, args, &|| {
+        ReflectionModule::get_resource(&ArgsGetResource {
+            file_path: "index.js".to_string(),
+        }).unwrap().unwrap()
+    })
 }
 
+pub fn run_js_wrapper(method: &str, args: &[u8], load_js: &dyn Fn() -> Vec<u8>) -> Vec<u8> {
+    let json = msgpack_to_json(args);
 
-pub fn invoke(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
-    let arg = args.get(0).unwrap();
+    let extern_code: Vec<u8> = load_js();
 
-    println!("This URI: {}", arg.as_string().unwrap());
+    let extern_code = String::from_utf8_lossy(&extern_code);
 
-    Ok(JsValue::String(JsString::from("Hello, world!")))
+    // let boilerplate = r#"const console = { 
+    //     log: (args) => subinvoke("ens/logger.eth", "debug", { message: JSON.stringify(args) }) 
+    // };"#;
+    let boilerplate = r#""#;
+    let call = format!("{method}(JSON.parse('{json}'));");
+    let args = wrap::imported::ArgsEval {
+        src: format!("{boilerplate}\n\n{extern_code}\n\n{call}"),
+    };
+
+    let result = JsEngineModule::eval(&args);
+
+    let result: JsEngineEvalResult = result.unwrap();
+
+    if let Some(error) = result.error {
+        panic!("{}", error);
+    };
+
+    let result = result.value.unwrap();
+
+    let result = json_to_msgpack(&result.to_string());
+
+    return result;
+}
+
+pub fn msgpack_to_json(bytes: &[u8]) -> String {
+    let value: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
+    serde_json::to_string(&value).unwrap()
+}
+
+pub fn json_to_msgpack(string: &str) -> Vec<u8> {
+    let value: serde_json::Value = serde_json::from_str(string).unwrap();
+    rmp_serde::encode::to_vec(&value).unwrap()
 }
 
 #[cfg(test)]
 mod tests {
-    use boa_engine::Context;
-    use polywrap_wasm_rs::JSON::json;
+    use serde::{Serialize, Deserialize};
 
-    use crate::invoke;
-    pub use crate::wrap::*;
-    use boa_engine::{
-        native_function::NativeFunction, prelude::JsObject, property::Attribute, Context, JsResult,
-        JsValue, Source,
-    };
+    use crate::{msgpack_to_json, json_to_msgpack};
 
-    #[test]
-    fn import() {
-        let args = ArgsEval {
-            src: "const null_value = null; null_value".to_string(),
-        };
-
-        // Creating the execution context
-        let mut ctx = Context::default();
-
-        // Adding custom implementation that mimics 'require'
-        ctx.register_global_function("invoke", 0, NativeFunction::from_fn_ptr(invoke))
-            .unwrap();
-
-        // Adding custom object that mimics 'module.exports'
-        let moduleobj = JsObject::default();
-        moduleobj
-            .set("exports", JsValue::from(" "), false, &mut ctx)
-            .unwrap();
-        ctx.register_global_property("module", JsValue::from(moduleobj), Attribute::default())
-            .unwrap();
-
-        // Instantiating the engine with the execution context
-        // Loading, parsing and executing the JS code from the source file
-        ctx.eval(Source::from_bytes(&buffer.unwrap())).unwrap();
-        
-        let result = crate::eval(args);
-
-        let expected = EvalResult {
-            value: Some(json!("null")),
-            error: None
-        };
-        assert_eq!(result.value.unwrap(), expected.value.unwrap());
+    #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+    pub struct MockType {
+        pub prop: String,
     }
-
-    #[test]
-    fn eval_null() {
-        let args = ArgsEval {
-            src: "const null_value = null; null_value".to_string(),
-        };
-        
-        let result = crate::eval(args);
-
-        let expected = EvalResult {
-            value: Some(json!("null")),
-            error: None
-        };
-        assert_eq!(result.value.unwrap(), expected.value.unwrap());
-    }
-
-    #[test]
-    fn eval_undefined() {
-        let args = ArgsEval {
-            src: "const undefined_value = undefined; undefined_value".to_string(),
-        };
-        
-        let result = crate::eval(args);
-
-        let expected = EvalResult {
-            value: Some(json!("undefined")),
-            error: None
-        };
-        assert_eq!(result.value.unwrap(), expected.value.unwrap());
-    }
-
-    #[test]
-    fn eval_string() {
-        let args = ArgsEval {
-            src: "'hello' + ' ' + 'world'".to_string(),
-        };
-        
-        let result = crate::eval(args);
-
-        let expected = EvalResult {
-            value: Some(json!("hello world")),
-            error: None
-        };
-        assert_eq!(result.value.unwrap(), expected.value.unwrap());
-    }
-
-    #[test]
-    fn eval_bool() {
-        let args = ArgsEval {
-            src: "const is_true = true; is_true".to_string(),
-        };
-        
-        let result = crate::eval(args);
-
-        let expected = EvalResult {
-            value: Some(json!(true)),
-            error: None
-        };
-        assert_eq!(result.value.unwrap(), expected.value.unwrap());
-    }
-
-    #[test]
-    fn eval_rational() {
-        let args = ArgsEval {
-            src: "const num = 123.456; num".to_string(),
-        };
-        
-        let result = crate::eval(args);
-
-        let expected = EvalResult {
-            value: Some(json!(123.456)),
-            error: None
-        };
-        assert_eq!(result.value.unwrap(), expected.value.unwrap());
-    }
-
-    #[test]
-    fn eval_integer() {
-        let args = ArgsEval {
-            src: "const num = 5; num".to_string(),
-        };
-        
-        let result = crate::eval(args);
-
-        let expected = EvalResult {
-            value: Some(json!(5)),
-            error: None
-        };
-        assert_eq!(result.value.unwrap(), expected.value.unwrap());
-    }
-
-    #[test]
-    fn eval_bit_int() {
-        let args = ArgsEval {
-            src: "const num = BigInt(9007199254740991); num".to_string(),
-        };
-        
-        let result = crate::eval(args);
-
-        let expected = EvalResult {
-            value: Some(json!("9007199254740991")),
-            error: None
-        };
-        assert_eq!(result.value.unwrap(), expected.value.unwrap());
-    }
-
-    #[test]
-    fn eval_object() {
-        let args = ArgsEval {
-            src: "const obj = { prop1: 1, prop2: 'hello' }; JSON.stringify(obj)".to_string(),
-        };
-        
-        let result = crate::eval(args);
-
-        let serialized_obj = json!({
-            "prop1": 1,
-            "prop2": "hello"
-        });
     
-        let expected = EvalResult {
-            value: Some(json!(serialized_obj.to_string())),
-            error: None
-        };
-
-        assert_eq!(result.value.unwrap(), expected.value.unwrap());
-    }
-
     #[test]
-    fn eval_undefined_variable() {
-        let args = ArgsEval {
-            src: "undefined_variable".to_string(),
+    fn end_to_end_serialization() {
+        let input = MockType {
+            prop: "a".to_string(),
         };
-        
-        let result = crate::eval(args);
+        let bytes = rmp_serde::encode::to_vec(&input).unwrap();
 
-        let expected = EvalResult {
-            value: None,
-            error: Some("\"ReferenceError\": \"undefined_variable is not defined\"".to_string())
-        };
+        let json = msgpack_to_json(&bytes);
+        let result = json_to_msgpack(&json);
 
-        assert_eq!(result.error.unwrap(), expected.error.unwrap());
+        assert_eq!(result, bytes);
     }
 }
